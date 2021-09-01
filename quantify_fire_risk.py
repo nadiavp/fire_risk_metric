@@ -3,6 +3,10 @@ import sys
 import pathlib
 import pyproj
 import json
+import pandas as pd
+from scipy.io import netcdf
+import netCDF4
+import gzip
 # this script runs through the opendss files of a power system model
 # and applies the fire risk metric which quantifies the risk of the
 # power system igniting a fire
@@ -69,6 +73,10 @@ def get_dist_fire_traits(power_model, dist_fire_components):
     return dist_fire_components
 
 def get_dist_fire_locations(power_model_dir):
+    # parse the files and select only the bay area: as defined as
+    # north to Sacremento: 38.5816N 121.4944W, 
+    # south and east to Fresno: 36.7378N 119.7871W, 
+    # and west to longitude 120W
     dist_coord_frame = pyproj.Proj(init='epsg:32610')
     lon_lat_coord_frame = pyproj.Proj(init='epsg:5070')
     dist_fire_components = {} # add something to read all from model
@@ -134,8 +142,121 @@ def get_dist_fire_locations(power_model_dir):
                         dist_fire_components[name]['normamps'] = 1000000000 # need to find a way to add rating
     return dist_fire_components
 
-def get_terrain_coords(fire_gis_dir):
+def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
+    # parse the files and select only the bay area: as defined as
+    # north to Sacremento: 38.5816N 121.4944W, 
+    # south and east to Fresno: 36.7378N 119.7871W, 
+    # and west to longitude 120W
     terrain_component_coords = {}
+    terrain_component_coords["type"] = "FeatureCollection"
+    terrain_component_coords["features"] = []
+
+    # get table for soil saturation
+    soil_table = pd.read_csv(soil_file)
+    soil_table = soil_table[['Region', 'Latitude', 'Longitude', 'Species', 'Soil_type', 'Soil_drainage',
+                            'Ecosystem_type', 'Ecosystem_state', 'Leaf_habit']]
+    soil_table = soil_table[soil_table['Region']=='California']
+    for sd, lat, long in zip(soil_table['Soil_drainage'], soil_table['Latitude'], soil_table['Longitude']):#soil_table['Soil_type']):
+        # not sure we need anything for soil type
+        if sd=='Dry':
+            risk = 10
+        elif sd=='Wet':
+            risk = 0
+        else:
+            risk=0
+        # add rainfall data interrelated with soil drainage to get overall saturation
+        #rain_table = pd.read_csv(precip_file)
+        
+        # add soil risk to geojson
+        soil_entry = {}
+        soil_entry["type"]="Feature"
+        soil_entry["geometry"] = {}
+        soil_entry["geometry"]["type"] = "Point"
+        soil_entry["geometry"]["coordinates"] = [lat, long]
+        soil_entry["properties"]={}
+        soil_entry["properties"]["soil_sat"]=risk
+        terrain_component_coords["features"].append(soil_entry)
+    print('soil saturation risk added to json')
+    # get table for lightning
+    lf = netCDF4.Dataset(lightning_file)
+    flashes = lf.variables['VHRMC_LIS_FRD'] # mean flashes for each month at long and lat in flashes/km2/day
+    months, latitude, longitude = flashes.get_dims()
+    months = lf.variables[months.name]
+    latitude = lf.variables['Latitude']
+    longitude = lf.variables['Longitude']
+    print(f"months: {months[0]} to {months[-1]}, \
+        lat: {latitude[0]} to {latitude[-1]}, \
+        long: {longitude[0]} to {longitude[-1]} \
+        resolution of {latitude[1]-latitude[0]} degrees,") #\
+    #    flash range: {min(flashes)} to {max(flashes)}")
+    # pull out for SFO bay area and convert to geojson
+    for month in months:
+        for lat in latitude:
+            if lat>36.7378 and lat<36.7378:
+                for long in longitude:
+                    if long>119.7871 and long<120:
+                        flash = flashes[month, long, lat]
+                        risk = flash/0.05 * 10 # normalize with 0.05 and then scale to 10 point scale
+                        # add risk to geojson
+                        lightning_entry = {}
+                        lightning_entry["type"]="Feature"
+                        lightning_entry["geometry"] = {}
+                        lightning_entry["geometry"]["type"] = "Point"
+                        lightning_entry["geometry"]["coordinates"] = [lat, long]
+                        lightning_entry["properties"]={}
+                        lightning_entry["properties"]["veg_type"]=risk
+                        lightning_entry["properties"]["month"]=month
+                        terrain_component_coords["features"].append(lightning_entry)
+    print('lightning risk added to json')
+    # convert ecosystem type and state into fire risk value
+    vegetation_risk = 0
+    for ess, est, lh, lat, long in zip(soil_table['Ecosystem_state'], soil_table['Ecosystem_type'], soil_table['Leaf_habit'], soil_table['Latitude'], soil_table['Longitude']):
+        if ess == 'Managed':
+            risk = 0
+        elif ess == 'Unmanaged': #unmanaged means it was managed or disturbed by people in the past
+            risk = 10
+        else: # if it's natural
+            risk = 5
+        vegetation_risk=risk
+            
+        if est == 'Desert':
+            risk = 10
+        elif est == 'Savanna':
+            risk = 9
+        elif est == 'Grassland':
+            risk = 8
+        elif est == 'Shrubland':
+            risk = 7
+        elif est == 'Forest':
+            risk = 3
+        elif est == 'Agriculture':
+            risk = 2
+        else: # nan's 0s
+            risk = 0
+        vegetation_risk = (vegetation_risk + risk)/2
+        for month in range(1,12):
+            if lh =='Deciduous':
+                if month>=9 and month<=11:
+                    risk = 5
+                else:
+                    risk = 3
+            else: # if evergreen
+                risk = 5
+            vegetation_risk = (vegetation_risk*2 + risk)/3
+            # add risk to geojson
+            veg_entry = {}
+            veg_entry["type"]="Feature"
+            veg_entry["geometry"] = {}
+            veg_entry["geometry"]["type"] = "Point"
+            veg_entry["geometry"]["coordinates"] = [lat, long]
+            veg_entry["properties"]={}
+            veg_entry["properties"]["veg_type"]=vegetation_risk
+            veg_entry["properties"]["month"]=month
+            terrain_component_coords["features"].append(veg_entry)
+    print('vegetation type risk added to json')
+    with open('terrain_risk_scores.json', 'w') as terr_score_file:
+        json.dump(terrain_component_coords, terr_score_file)
+    print('terrain risk factors recorded in terrain_risk_scores.json')
     return terrain_component_coords
 
 def distribution_terrain_risk_matrix():
@@ -157,7 +278,7 @@ def distribution_terrain_risk_matrix():
                             ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']]
     return dist_terr_cross_list
 
-def quantify_fire_risk(power_model_dir, fire_gis_dir):
+def quantify_fire_risk(power_model_dir, fire_gis_dir, soil_file, veg_file, lightning_file, burnprob_file):
     # start with a fire risk of zero and slowly add to that
     total_fire_risk = 0
     # initialize list of terrain traits
@@ -170,7 +291,7 @@ def quantify_fire_risk(power_model_dir, fire_gis_dir):
     # get power model traits according to metric
     dist_fire_components = get_dist_fire_traits(power_model, dist_fire_components)
     # get locations for fire susceptible attributes
-    terrain_component_coords = get_terrain_coords(fire_gis_dir)
+    terrain_component_coords = get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file)
     # if grid fire risk traits and landscape/climate fire risk traits are within
     # __ meters of each other, consider them co-located and multiply
     dist_index = 0
@@ -189,11 +310,20 @@ def quantify_fire_risk(power_model_dir, fire_gis_dir):
     return total_fire_risk
 
 if __name__=="__main__":
-    power_model_dir = sys.argv[1]
+    power_model_dir = pathlib.Path("C:/Users/npanossi/Documents/Gemini-XFC/GEMINI-XFC/P1U/solar_medium_batteries_low_timeseries/DSSfiles/p1uhs0_1247")
+    #sys.argv[1]
     if isinstance(power_model_dir, str):
         power_model_dir = pathlib.Path(power_model_dir)
     fire_gis_dir = sys.argv[2]
+    soil_file = 'srdb-data-V5.csv'
+    veg_file = 'cdl_fccs_merge2010/cdl_fccs_merge2010.tif.aux.xml'
+    lightning_file = 'VHRMC.nc'
+    burnprob_file = 'CONUS_iBP.tif'
     if isinstance(fire_gis_dir, str):
         fire_gis_dir = pathlib.Path(fire_gis_dir)
-    total_fire_risk = quantify_fire_risk(power_model_dir, fire_gis_dir)
+        soil_file = fire_gis_dir / soil_file
+        veg_file = fire_gis_dir /veg_file
+        lightning_file = fire_gis_dir / lightning_file
+        burnprob_file = fire_gis_dir / burnprob_file
+    total_fire_risk = quantify_fire_risk(power_model_dir, fire_gis_dir, soil_file, veg_file, lightning_file, burnprob_file)
     print(total_fire_risk)
