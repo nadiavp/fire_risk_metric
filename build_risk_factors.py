@@ -6,7 +6,7 @@ import pandas as pd
 data_location = os.path.join('/datasets','SMART-DS','v1.0','2016','SFO')
 
 def run_analysis(region):
-        metrics_location = os.path.join(data_location,region,'scenarios','base_timeseries','metrics.csv')
+        metrics_location = os.path.join(data_location,region,'scenarios','solar_medium_batteries_low_timeseries','metrics.csv')
         metrics = pd.read_csv(metrics_location,header=0)
 
         overhead_map = {}
@@ -78,6 +78,6 @@ for feeder in all_overhead_map:
     risk_factor = all_overhead_map[feeder]+all_transformer_overload_map[feeder]+all_line_overload_map[feeder]
     result.loc[cnt] = (feeder,all_overhead_map[feeder],all_transformer_overload_map[feeder],all_line_overload_map[feeder],risk_factor)
     cnt+=1
-result = result.sort_values(by=['risk factor','feeder'],ascending=False)
-result.to_csv('summary.csv',header=True,index=False)
+#result = result.sort_values(by=['risk factor','feeder'],ascending=False)
+result.to_csv('smbl_summary.csv',header=True,index=False)
 

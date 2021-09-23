@@ -7,6 +7,7 @@ import pandas as pd
 from scipy.io import netcdf
 import netCDF4
 import gzip
+from sklearn.neighbors import BallTree
 # this script runs through the opendss files of a power system model
 # and applies the fire risk metric which quantifies the risk of the
 # power system igniting a fire
@@ -17,43 +18,34 @@ dist_trait_names = ['line_to_veg_dist', 'line_to_line_dist', 'line_to_gnd_dist',
 
 terrain_trait_names = ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']
 
-def get_dist_fire_traits(power_model, dist_fire_components):
+def get_dist_fire_traits(dist_risk_components, bus_coords):
     # check the risks we know just by looking at the distribution model 
     # default to 0
     n_traits = len(dist_trait_names)
     #dist_fire_components = []
-    #dist_risk_scores = {}
-    ##### TODO: run model at peak load and export line currents and transformer currents
-    # go through all components and check risk factors
-    for dfc in dist_fire_components.keys():
-        dist_risk_scores[dfc.name] = {}
+    dist_risk_scores = {}
+    # add risks for oil type transformer, uninsulated, hif, psps, misting, coordination, and tracking
+    for dfc in dist_risk_components:
+        dist_risk_scores[dfc['feeder']] = {}
         risk_score = [0]*n_traits
         overhead = False
-        # check line features
-        if dfc.name.startswith('Line'):
-            # check age
-            if dfc:
-                risk_score[3] = 0
-            #check if overhead, denoted in line code. OH for high voltage or non-inner city lines
-            if 'OH' in dfc.LineCode: # need to double check ODSS line code call
-                risk_score[6] = 10
-                overhead = True
-            # check if insulated. True for low voltage in city or UG lines
-            if overhead and dfc.Voltage>120:
-                risk_score[7] = 10
-            # check line peak current
-            ######
-            # TODO: use run of peak load and check current vs. rating
-            ######
-        # check transformer features
-        if dfc.name.startswith('Transformer'):
-            # check if oil
-            if dfc:
-                risk_score[5] = 10
-            # check transformer peak current
-            #######
-            # TODO: use run of peak load and check current vs. rating
-            #######
+        # check age
+        if dfc:
+            risk_score[3] = 0
+        #check if overhead, denoted in line code. OH for high voltage or non-inner city lines
+        percent_overhead = dfc['percentage overhead']
+        risk_score[6] = percent_overhead/10
+        # check if insulated. True for low voltage in city or UG lines
+        if 'lv' not in dfc['feeder']:
+            uninsulated = percent_overhead
+            risk_score[7] = uninsulated/10
+        # check line peak current
+        risk_score[8] = dfc['percentage line length overloaded']
+        # check transformer loading
+        risk_score[9] = dfc['percentage transformers overloaded']
+        # check if oil
+        #if dfc: # assume all smart ds transformers are oil based
+        risk_score[5] = 10
         # check resilience features
         # high impedance fault detection is still an area of research, power
         # safety shutoffs are only used in some areas of California
@@ -61,12 +53,13 @@ def get_dist_fire_traits(power_model, dist_fire_components):
         # response team coordination is difficult to quantify
         # most fire response teams have 1km resolution sattelite tracking
         risk_score[10] = 10 # high impedance fault detection
-        risk_score[11] = 5 # power safety shutoffs
+        risk_score[11] = 4 # power safety shutoffs used in this area
         risk_score[12] = 10 # misting fire hose nozzle
-        risk_score[13] = 5 # response team coordination
+        risk_score[13] = 4 # response team coordination
         risk_score[14] = 1 # high fidelity tracking
         # add risk score to json
-        dist_fire_components[dfc.name][score] = risk_score
+        dist_fire_components[dfc['feeder']]['risks'] = risk_score
+        dist_fire_components[dfc['feeder']]['coords'] = bus_coords[dfc['feeder']]
     # export distribution risk score to json format
     with open('dist_risk_scores.json', 'w') as dist_score_file:
         json.dump(dist_fire_components, dist_score_file)
@@ -140,7 +133,7 @@ def get_dist_fire_locations(power_model_dir):
                         dist_fire_components[name] = {}
                         dist_fire_components[name]['coords'] = [bus_coords[bus]]
                         dist_fire_components[name]['normamps'] = 1000000000 # need to find a way to add rating
-    return dist_fire_components
+    return dist_fire_components, bus_coords
 
 def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
     # parse the files and select only the bay area: as defined as
@@ -156,6 +149,7 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
     soil_table = soil_table[['Region', 'Latitude', 'Longitude', 'Species', 'Soil_type', 'Soil_drainage',
                             'Ecosystem_type', 'Ecosystem_state', 'Leaf_habit']]
     soil_table = soil_table[soil_table['Region']=='California']
+    soil_risk_list = []
     for sd, lat, long in zip(soil_table['Soil_drainage'], soil_table['Latitude'], soil_table['Longitude']):#soil_table['Soil_type']):
         # not sure we need anything for soil type
         if sd=='Dry':
@@ -175,9 +169,11 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
         soil_entry["geometry"]["coordinates"] = [lat, long]
         soil_entry["properties"]={}
         soil_entry["properties"]["soil_sat"]=risk
+        soil_risk_list.append(soil_entry)
         terrain_component_coords["features"].append(soil_entry)
     print('soil saturation risk added to json')
     # get table for lightning
+    lightning_risk_list = []
     lf = netCDF4.Dataset(lightning_file)
     flashes = lf.variables['VHRMC_LIS_FRD'] # mean flashes for each month at long and lat in flashes/km2/day
     months, latitude, longitude = flashes.get_dims()
@@ -206,9 +202,11 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
                         lightning_entry["properties"]={}
                         lightning_entry["properties"]["veg_type"]=risk
                         lightning_entry["properties"]["month"]=month
+                        lightning_risk_list.append(lightning_entry)
                         terrain_component_coords["features"].append(lightning_entry)
     print('lightning risk added to json')
     # convert ecosystem type and state into fire risk value
+    veg_risk_list = []
     vegetation_risk = 0
     for ess, est, lh, lat, long in zip(soil_table['Ecosystem_state'], soil_table['Ecosystem_type'], soil_table['Leaf_habit'], soil_table['Latitude'], soil_table['Longitude']):
         if ess == 'Managed':
@@ -252,33 +250,84 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
             veg_entry["properties"]={}
             veg_entry["properties"]["veg_type"]=vegetation_risk
             veg_entry["properties"]["month"]=month
+            veg_risk_list.append(veg_entry)
             terrain_component_coords["features"].append(veg_entry)
     print('vegetation type risk added to json')
     with open('terrain_risk_scores.json', 'w') as terr_score_file:
         json.dump(terrain_component_coords, terr_score_file)
     print('terrain risk factors recorded in terrain_risk_scores.json')
-    return terrain_component_coords
+    return terrain_component_coords, soil_risk_list, lightning_risk_list, veg_risk_list
 
 def distribution_terrain_risk_matrix():
-    dist_terr_cross_list = [['ground_veg', 'veg_moisture', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'],
-                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']]
+    dist_terr_cross_list = [['ground_veg', 'veg_moisture', 'wind_speed', 'ambient_temp'], # line-to-veg distange
+                            ['ground_veg', 'wind_speed', 'ambient_temp'], # line-to-line distance
+                            ['ground_veg', 'soil_saturation', 'wind_speed', 'ambient_temp'], # line-to-ground distance
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'], # line age
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'], # transformer age
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'ambient_temp'], # oil type transformer
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed'], # overhead
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed'], # uninsulated
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed', 'ambient_temp'], # line peak load
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'wind_speed', 'ambient_temp'], # transformer peak load
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'], # HIF detection
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'], # power safety shutoff threshold
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'], # provision of misting fire suppression equipment
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'], # fire response team coordination
+                            ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']] # high fidelity fire tracking
     return dist_terr_cross_list
 
-def quantify_fire_risk(power_model_dir, fire_gis_dir, soil_file, veg_file, lightning_file, burnprob_file):
+def get_interrelated_risk(terrain_risks, dist_risks, soil_risk, lightning_risk, veg_risk, temperature_file, wind_file):
+    # use nearest neighbor for each distribution feeder and each environmental factor, to get an interrelationship score for that feeder
+    ######## find nearest neighbor indices
+    # get coordinates for distribution feeders and all environmental factors
+    all_coords = []
+    for dfr in dist_risk:
+        dist_coord = dfr['coords']
+        all_coords.append(dist_coords)
+    
+    soil_coords = [sc['coords'] for sc in soil_risk]
+    light_coords = [lc['coords'] for lc in lightning_risk]
+    veg_coords = [vc['coords'] for vc in veg_risk]
+    
+    #tree = BallTree(terrain_coords, leaf_size=15)
+    #bus_terrain_distances, terrain_indices = tree.query(all_coords, k=1)
+    soil_tree = BallTree(soil_coords, leaf_size=10)
+    light_tree = BallTree(light_coords, leaf_size=10)
+    veg_tree = BallTree(veg_coords, leaf_size=10)
+    bus_soil_dist, soil_inds = soil_tree.query(all_coords, k=1)
+    bus_light_dist, light_inds = light_tree.query(all_coords, k=1)
+    bus_veg_dist, veg_inds = veg_tree.(all_coords, k=1)
+    
+    # go through nearest neighbor points and assign attributes
+    risk_table = distribution_terrain_risk_matrix()
+    dist_i = 0
+    all_risks = {}
+    for dfr in dist_risk:
+        feeder_risks = []
+        feeder_risks = dfr['risks']
+        # ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']
+        nearest_soil = soil_risk[soil_inds[dist_i]]
+        nearest_light = lightning_risk[light_inds[dist_i]]
+        nearest_veg = veg_risk[veg_inds[dist_i]]
+        # follow the matrix
+        fri=0
+        inter_risk = []
+        for fr in feeder_risks:
+            if 'ground_veg' in risk_table[fri]:
+                inter_risk.append(fr*nearest_veg)
+            if 'soil_saturation' in risk_table[fri]:
+                inter_risk.append(fr*nearest_soil)
+            if 'veg_moisture' in risk_table[fri]:
+                inter_risk.append(fr*nearest_moist)
+            if 'lightning' in risk_table[fri]:
+                inter_risk.append(fr*nearest_light)
+            #if 'wind_speed' in risk_table[fri]:
+            #    inter_risk.append(fr*nearest_wind)
+        all_risks[dfr['feeder']]['risk']=sum(inter_risk)
+        all_risks[dfr['feeder']]['coords'] = dist_risk['coords']
+    return all_risks
+
+def quantify_fire_risk(power_model_dir, fire_gis_dir, soil_file, veg_file, lightning_file, burnprob_file, temperature_file, wind_file):
     # start with a fire risk of zero and slowly add to that
     total_fire_risk = 0
     # initialize list of terrain traits
@@ -287,26 +336,14 @@ def quantify_fire_risk(power_model_dir, fire_gis_dir, soil_file, veg_file, light
     # load the power model
     power_model = odd.run_command(str(power_model_dir / 'DSSfiles/Master.dss'))
     # get locations for power system components and assign locations to fire risk traits
-    dist_fire_components = get_dist_fire_locations(power_model_dir)
+    dist_fire_components, bus_coords = get_dist_fire_locations(power_model_dir)
     # get power model traits according to metric
-    dist_fire_components = get_dist_fire_traits(power_model, dist_fire_components)
+    dist_fire_components = get_dist_fire_traits(power_model, bus_coords)
     # get locations for fire susceptible attributes
-    terrain_component_coords = get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file)
-    # if grid fire risk traits and landscape/climate fire risk traits are within
-    # __ meters of each other, consider them co-located and multiply
-    dist_index = 0
-    for ps_comp in dist_fire_components.keys():
-        ps_coord_list = dist_fire_components[ps_comp]['coords']
-        terrain_index = 0
-        # check distances between distribution system risks and environmental risks
-        ##### TODO: alter the below to create loop where distance from transformers (points) and lines (line) to 
-        ##### environmental risk areas (polygons) are captured
-        for tc_coord in terrain_component_coords:
-            if (terrain_trait_names[terrain_index] in dist_terr_cross_list[dist_index]) and abs(ps_coord-tc_coord) <= 0.001:
-                total_fire_risk += dist_trait_score[dist_index] * terrain_trait_score[terrain_index]
-            terrain_index += 1
-        dist_index += 1
-        #####
+    terrain_component_coords, soil_risk, lightning_risk, veg_risk = get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file)
+    # use nearest neighbor to find interdependent risk factors
+    total_fire_risk = get_interrelated_risk(terrain_component_coords, dist_fire_components, soil_risk, lightning_risk, veg_risk, temperature_file, wind_file)
+    
     return total_fire_risk
 
 if __name__=="__main__":
@@ -314,11 +351,14 @@ if __name__=="__main__":
     #sys.argv[1]
     if isinstance(power_model_dir, str):
         power_model_dir = pathlib.Path(power_model_dir)
+    power_model_risk = 'smbl_summary.csv'
     fire_gis_dir = sys.argv[2]
     soil_file = 'srdb-data-V5.csv'
     veg_file = 'cdl_fccs_merge2010/cdl_fccs_merge2010.tif.aux.xml'
     lightning_file = 'VHRMC.nc'
     burnprob_file = 'CONUS_iBP.tif'
+    temperature_file = 'temperature.parquet'
+    wind_file = 'wind.parquet'
     if isinstance(fire_gis_dir, str):
         fire_gis_dir = pathlib.Path(fire_gis_dir)
         soil_file = fire_gis_dir / soil_file
