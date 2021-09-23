@@ -7,6 +7,9 @@ import pandas as pd
 from scipy.io import netcdf
 import netCDF4
 import gzip
+import pyarrow.parquet as pq
+import geojson
+import numpy as np
 from sklearn.neighbors import BallTree
 # this script runs through the opendss files of a power system model
 # and applies the fire risk metric which quantifies the risk of the
@@ -18,21 +21,29 @@ dist_trait_names = ['line_to_veg_dist', 'line_to_line_dist', 'line_to_gnd_dist',
 
 terrain_trait_names = ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']
 
-def get_dist_fire_traits(dist_risk_components, bus_coords):
+def get_dist_risk_from_parquet(dist_risk_file):
+    dist_risk_table = pq.read_table(dist_risk_file)
+    dist_risk_df = dist_risk_table.to_pandas()
+    print(dist_risk_df['p10uhs0_1247--p10udt2190'][0])
+    return dist_risk_df
+
+def get_dist_fire_traits(power_model, dist_fire_components):
     # check the risks we know just by looking at the distribution model 
     # default to 0
     n_traits = len(dist_trait_names)
     #dist_fire_components = []
-    dist_risk_scores = {}
-    # add risks for oil type transformer, uninsulated, hif, psps, misting, coordination, and tracking
-    for dfc in dist_risk_components:
-        dist_risk_scores[dfc['feeder']] = {}
+    #dist_risk_scores = {}
+    ##### TODO: run model at peak load and export line currents and transformer currents
+    # go through all components and check risk factors
+    for dfc in dist_fire_components.keys():
+        dist_risk_scores[dfc.name] = {}
         risk_score = [0]*n_traits
         overhead = False
-        # check age
-        if dfc:
-            risk_score[3] = 0
-        #check if overhead, denoted in line code. OH for high voltage or non-inner city lines
+        # check line features
+        if dfc.name.startswith('Line'):
+            # check age
+            if dfc:
+                risk_score[3] = 0
         percent_overhead = dfc['percentage overhead']
         risk_score[6] = percent_overhead/10
         # check if insulated. True for low voltage in city or UG lines
@@ -53,16 +64,15 @@ def get_dist_fire_traits(dist_risk_components, bus_coords):
         # response team coordination is difficult to quantify
         # most fire response teams have 1km resolution sattelite tracking
         risk_score[10] = 10 # high impedance fault detection
-        risk_score[11] = 4 # power safety shutoffs used in this area
+        risk_score[11] = 5 # power safety shutoffs
         risk_score[12] = 10 # misting fire hose nozzle
-        risk_score[13] = 4 # response team coordination
+        risk_score[13] = 5 # response team coordination
         risk_score[14] = 1 # high fidelity tracking
         # add risk score to json
-        dist_fire_components[dfc['feeder']]['risks'] = risk_score
-        dist_fire_components[dfc['feeder']]['coords'] = bus_coords[dfc['feeder']]
+        dist_fire_components[dfc.name][score] = risk_score
     # export distribution risk score to json format
     with open('dist_risk_scores.json', 'w') as dist_score_file:
-        json.dump(dist_fire_components, dist_score_file)
+        geojson.dump(dist_fire_components, dist_score_file)
     return dist_fire_components
 
 def get_dist_fire_locations(power_model_dir):
@@ -135,11 +145,11 @@ def get_dist_fire_locations(power_model_dir):
                         dist_fire_components[name]['normamps'] = 1000000000 # need to find a way to add rating
     return dist_fire_components, bus_coords
 
-def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
+def get_terrain_coords(soil_file, soil_moisture_file, veg_file, lightning_file, burnprob_file):
     # parse the files and select only the bay area: as defined as
     # north to Sacremento: 38.5816N 121.4944W, 
     # south and east to Fresno: 36.7378N 119.7871W, 
-    # and west to longitude 120W
+    # and west to longitude 120W (west is negative?)
     terrain_component_coords = {}
     terrain_component_coords["type"] = "FeatureCollection"
     terrain_component_coords["features"] = []
@@ -149,15 +159,23 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
     soil_table = soil_table[['Region', 'Latitude', 'Longitude', 'Species', 'Soil_type', 'Soil_drainage',
                             'Ecosystem_type', 'Ecosystem_state', 'Leaf_habit']]
     soil_table = soil_table[soil_table['Region']=='California']
+    moisture_table = pd.read_csv(soil_moisture_file)
+    moisture_table = moisture_table[['date', 'time', 'latitude', 'longitude', 'soil_moisture']]
+    #for sd, lat, long in zip(soil_table['Soil_drainage'], soil_table['Latitude'], soil_table['Longitude']):#soil_table['Soil_type']):
+    #    # not sure we need anything for soil type
+    #    if sd=='Dry':
+    #        risk = 10
+    #    elif sd=='Wet':
+    #        risk = 0
+    #    else:
+    #        risk=0
+    moisture_risk_list=[]
     soil_risk_list = []
-    for sd, lat, long in zip(soil_table['Soil_drainage'], soil_table['Latitude'], soil_table['Longitude']):#soil_table['Soil_type']):
-        # not sure we need anything for soil type
-        if sd=='Dry':
-            risk = 10
-        elif sd=='Wet':
-            risk = 0
-        else:
-            risk=0
+    for sm, lat, long, date, time in zip(moisture_table['soil_moisture'], moisture_table['latitude'], moisture_table['longitude'], moisture_table['date'], moisture_table['time']):
+        risk = (1-float(sm))*10
+        if risk == 'nan' or np.isnan(risk):
+            print('nan risk for soil moisture')
+            pass
         # add rainfall data interrelated with soil drainage to get overall saturation
         #rain_table = pd.read_csv(precip_file)
         
@@ -169,11 +187,12 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
         soil_entry["geometry"]["coordinates"] = [lat, long]
         soil_entry["properties"]={}
         soil_entry["properties"]["soil_sat"]=risk
-        soil_risk_list.append(soil_entry)
+        soil_entry["properties"]["date"] = date
+        soil_entry["properties"]["time"] = time
+        moisture_risk_list.append(soil_entry)
         terrain_component_coords["features"].append(soil_entry)
     print('soil saturation risk added to json')
     # get table for lightning
-    lightning_risk_list = []
     lf = netCDF4.Dataset(lightning_file)
     flashes = lf.variables['VHRMC_LIS_FRD'] # mean flashes for each month at long and lat in flashes/km2/day
     months, latitude, longitude = flashes.get_dims()
@@ -186,12 +205,16 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
         resolution of {latitude[1]-latitude[0]} degrees,") #\
     #    flash range: {min(flashes)} to {max(flashes)}")
     # pull out for SFO bay area and convert to geojson
+    flas_risk_list = []
     for month in months:
         for lat in latitude:
             if lat>36.7378 and lat<36.7378:
                 for long in longitude:
-                    if long>119.7871 and long<120:
+                    if long>-120 and long<-119.7871:#119.7871 and long<120:
                         flash = flashes[month, long, lat]
+                        if flash == 'nan' or np.isnan(flash):
+                            print('nan risk for flashes')
+                            pass
                         risk = flash/0.05 * 10 # normalize with 0.05 and then scale to 10 point scale
                         # add risk to geojson
                         lightning_entry = {}
@@ -200,14 +223,14 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
                         lightning_entry["geometry"]["type"] = "Point"
                         lightning_entry["geometry"]["coordinates"] = [lat, long]
                         lightning_entry["properties"]={}
-                        lightning_entry["properties"]["veg_type"]=risk
+                        lightning_entry["properties"]["flash"]=risk
                         lightning_entry["properties"]["month"]=month
-                        lightning_risk_list.append(lightning_entry)
+                        flash_risk_list.append(lightning_entry)
                         terrain_component_coords["features"].append(lightning_entry)
     print('lightning risk added to json')
     # convert ecosystem type and state into fire risk value
-    veg_risk_list = []
     vegetation_risk = 0
+    veg_risk_list = []
     for ess, est, lh, lat, long in zip(soil_table['Ecosystem_state'], soil_table['Ecosystem_type'], soil_table['Leaf_habit'], soil_table['Latitude'], soil_table['Longitude']):
         if ess == 'Managed':
             risk = 0
@@ -241,6 +264,9 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
             else: # if evergreen
                 risk = 5
             vegetation_risk = (vegetation_risk*2 + risk)/3
+            if risk == 'nan' or np.isnan(risk):
+                print('nan risk in vegetation')
+                pass
             # add risk to geojson
             veg_entry = {}
             veg_entry["type"]="Feature"
@@ -253,10 +279,30 @@ def get_terrain_coords(soil_file, veg_file, lightning_file, burnprob_file):
             veg_risk_list.append(veg_entry)
             terrain_component_coords["features"].append(veg_entry)
     print('vegetation type risk added to json')
-    with open('terrain_risk_scores.json', 'w') as terr_score_file:
-        json.dump(terrain_component_coords, terr_score_file)
+    terrain_risk_no_nan = {}
+    terrain_risk_no_nan['features'] = []
+    for feature in terrain_component_coords["features"]:
+        if np.isnan(feature["geometry"]["coordinates"][0]) or np.isnan(feature["geometry"]["coordinates"][1]):
+            pass
+        elif "month" in feature["properties"].keys() and np.isnan(feature["properties"]["month"]):
+            pass
+        elif "veg_type" in feature["properties"].keys() and np.isnan(feature["properties"]["veg_type"]):
+            pass
+        elif "date" in feature["properties"].keys() and not isinstance(feature["properties"]["date"], str): #np.isnan(feature["properties"]["date"]):
+            pass
+        elif "time" in feature["properties"].keys() and not isinstance(feature["properties"]["time"], str):
+            pass
+        elif "flash" in feature["properties"].keys() and np.isnan(feature["properties"]["flash"]):
+            pass
+        elif "soil_sat" in feature["properties"].keys() and np.isnan(feature["properties"]["soil_sat"]):
+            pass
+        else:
+            terrain_risk_no_nan["features"].append(feature)
+    
+    with open('terrain_risk_scores.geojson', 'w') as terr_score_file:
+        geojson.dump(terrain_risk_no_nan, terr_score_file)
     print('terrain risk factors recorded in terrain_risk_scores.json')
-    return terrain_component_coords, soil_risk_list, lightning_risk_list, veg_risk_list
+    return terrain_component_coords, moisture_risk_list, flash_risk_list, veg_risk_list
 
 def distribution_terrain_risk_matrix():
     dist_terr_cross_list = [['ground_veg', 'veg_moisture', 'wind_speed', 'ambient_temp'], # line-to-veg distange
@@ -275,6 +321,7 @@ def distribution_terrain_risk_matrix():
                             ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp'], # fire response team coordination
                             ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']] # high fidelity fire tracking
     return dist_terr_cross_list
+
 
 def get_interrelated_risk(terrain_risks, dist_risks, soil_risk, lightning_risk, veg_risk, temperature_file, wind_file):
     # use nearest neighbor for each distribution feeder and each environmental factor, to get an interrelationship score for that feeder
@@ -296,7 +343,7 @@ def get_interrelated_risk(terrain_risks, dist_risks, soil_risk, lightning_risk, 
     veg_tree = BallTree(veg_coords, leaf_size=10)
     bus_soil_dist, soil_inds = soil_tree.query(all_coords, k=1)
     bus_light_dist, light_inds = light_tree.query(all_coords, k=1)
-    bus_veg_dist, veg_inds = veg_tree.(all_coords, k=1)
+    bus_veg_dist, veg_inds = veg_tree.query(all_coords, k=1)
     
     # go through nearest neighbor points and assign attributes
     risk_table = distribution_terrain_risk_matrix()
