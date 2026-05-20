@@ -1,7 +1,7 @@
-# fire_risk_metric
+# Fire Power Risk Metric
 
 ## Introduction
-
+The fire power risk metric determines the relative wildfire risk of power system equipment causing an ignition and risk of power system equipment to local wildfires. This combined relative risk is intended to support infrastructure upgrade prioritization and resilience improvement. 
 This script uses SMART-DS data and GIS data from various sources to quantify the fire risk from the distribution and transmission power systems in a region.
 These risk metrics are intended to be used 
 
