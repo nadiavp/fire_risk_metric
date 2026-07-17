@@ -1,4 +1,4 @@
-# Fire Power Risk Metric
+# Fire Power System Risk Metric
 
 ## Introduction
 The fire power risk metric determines the relative wildfire risk of power system equipment causing an ignition and risk of power system equipment to local wildfires. This combined relative risk is intended to support infrastructure upgrade prioritization and resilience improvement. 
