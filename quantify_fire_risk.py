@@ -9,7 +9,10 @@ import json
 dist_trait_names = ['line_to_veg_dist', 'line_to_line_dist', 'line_to_gnd_dist', 'line_age',
                     'transformer_age', 'oil_type_transformer', 'overhead', 'uninsulated',
                     'line_peak_load', 'transformer_peak_load', 'hif_detection', 'powersafety_shutoff',
-                    'misting_fire_suppresion', 'response_team_coordination', 'high_fidelity_tracking']
+                    'fuse_type', 'response_team_coordination', 'high_fidelity_tracking', 'pole_type']
+# hif_detection reduces risk if there is monitoring to prevent arcing particularly with vegetation contact
+# fuse type reduces risk if they are non-expulsionary fuses, if they are reclosers that can adjust settings in that order
+# pole type reduces risk if it is a higher pole class, a wrapped pole, an aluminum, steel, or iron pole in that order
 
 terrain_trait_names = ['ground_veg', 'soil_saturation', 'veg_moisture', 'lightning', 'wind_speed', 'ambient_temp']
 
@@ -58,11 +61,11 @@ def get_dist_fire_traits(power_model, dist_fire_components):
         # most fire response teams have 1km resolution sattelite tracking
         risk_score[10] = 10 # high impedance fault detection
         risk_score[11] = 5 # power safety shutoffs
-        risk_score[12] = 10 # misting fire hose nozzle
+        risk_score[12] = 10 # fuse_type
         risk_score[13] = 5 # response team coordination
         risk_score[14] = 1 # high fidelity tracking
         # add risk score to json
-        dist_fire_components[dfc.name][score] = risk_score
+        dist_fire_components[dfc.name]['score'] = risk_score
     # export distribution risk score to json format
     with open('dist_risk_scores.json', 'w') as dist_score_file:
         json.dump(dist_fire_components, dist_score_file)
