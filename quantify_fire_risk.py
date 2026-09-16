@@ -455,8 +455,8 @@ def quantify_fire_risk(power_model_risk, fire_gis_dir, soil_file, soil_moisture_
     return total_fire_risk
 
 if __name__=="__main__":
-    power_model_dir = pathlib.Path("C:/Users/npanossi/Documents/FireSEEDLDRD/metric_script/p28u")
-    #("C:/Users/npanossi/Documents/Gemini-XFC/GEMINI-XFC/P1U/solar_medium_batteries_low_timeseries/DSSfiles/p1uhs0_1247")
+    power_model_dir = pathlib.Path("p28u")
+    #"P1U/solar_medium_batteries_low_timeseries/DSSfiles/p1uhs0_1247"
     #sys.argv[1]
     if isinstance(power_model_dir, str):
         power_model_dir = pathlib.Path(power_model_dir)
