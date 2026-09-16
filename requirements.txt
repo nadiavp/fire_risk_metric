@@ -1,0 +1,13 @@
+# Python dependencies for the fire risk metric environment.
+# Install into the `firerisk` env:  pip install -r requirements.txt  (or `make py-deps`).
+# the environment should be built on python >= 3.14 
+
+# -- for parsing ignition records -- 
+numpy>=2.5.0
+pandas>=3.0.5
+openpyxl>=3.1.5
+
+# -- for reading a distribution network and determining risk -- 
+pyproj>=3.7.2
+opendssdirect>=0.9.4
+# opendssdirect may need to be installed with: pip install "OpenDSSDirect.py[extras]"
